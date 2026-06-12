@@ -1,0 +1,36 @@
+{
+  "name": "agent-console",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production-grade Next.js console for the Alchemyst AI Full Stack Engineer assignment",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "next": "14.2.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zustand": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.10",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "@vitejs/plugin-react": "4.3.1",
+    "autoprefixer": "10.4.19",
+    "happy-dom": "14.12.3",
+    "postcss": "8.4.39",
+    "tailwindcss": "3.4.6",
+    "typescript": "5.5.3",
+    "vitest": "1.6.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
