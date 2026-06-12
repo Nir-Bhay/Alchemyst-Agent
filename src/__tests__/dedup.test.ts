@@ -22,9 +22,8 @@ describe("Dedup", () => {
     const d = new Dedup();
     d.noteReceived(10);
     d.noteReceived(3);
-    // highestRendered tracks max of (rendered, received):
-    expect(d.highestRendered()).toBe(10);
-    // But the dedup set only contains rendered seqs:
+    expect(d.highestReceived()).toBe(10);
+    expect(d.highestRendered()).toBe(0);
     expect(d.has(10)).toBe(false);
     expect(d.has(3)).toBe(false);
   });
@@ -37,5 +36,20 @@ describe("Dedup", () => {
     expect(d.has(6)).toBe(true);
     expect(d.has(7)).toBe(true);
     expect(d.has(8)).toBe(false);
+  });
+
+  it("highestRendered never regresses when a smaller seq is rendered", () => {
+    const d = new Dedup();
+    d.markRendered(10);
+    d.markRendered(2); // lower seq — should not move the high-water mark
+    expect(d.highestRendered()).toBe(10);
+  });
+
+  it("noteReceived and markRendered track separate maxima", () => {
+    const d = new Dedup();
+    d.noteReceived(20);
+    d.markRendered(5);
+    expect(d.highestReceived()).toBe(20);
+    expect(d.highestRendered()).toBe(5);
   });
 });

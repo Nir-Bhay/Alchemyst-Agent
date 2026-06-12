@@ -1,53 +1,49 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// backoff.ts
+// backoff
 //
-// Pure exponential backoff with jitter, as specified in the assignment:
+// Pure exponential backoff with symmetric jitter, as the assignment
+// specifies:
 //
 //   attempt 0: 500ms
-//   attempt 1: 1000ms
-//   attempt 2: 2000ms
-//   attempt 3: 4000ms
-//   attempt 4: 8000ms
-//   attempt 5+: 10000ms (cap)
+//   attempt 1: 1s
+//   attempt 2: 2s
+//   attempt 3: 4s
+//   attempt 4+: capped at 10s
 //
-// On top of the exponential curve we add ±25% jitter to avoid thundering
-// herd reconnects from a flaky network. The jitter is applied *after*
-// capping so the cap is still respected at the upper bound.
-//
-// The function is `nextDelay(attempt) -> ms`. The state (the attempt
-// counter) lives in the ConnectionManager; this module is a pure lookup
-// table.
-// ─────────────────────────────────────────────────────────────────────────────
+// The jitter multiplier is provided by the caller; this module is
+// deliberately test-deterministic — no `Math.random` here.
 
 const BASE_MS = 500;
 const CAP_MS = 10_000;
-const MAX_EXP = 20; // 2^20 * 500ms is well past the cap; we cap before multiplying
+// Past 2^20 * 500ms we are well past the cap. Clamp the exponent so
+// absurd attempt counts cannot produce Infinity.
+const MAX_EXP = 20;
 
-export function nextDelay(attempt: number, jitterRatio: number = 0.25): number {
+/**
+ * Compute the next reconnect delay in milliseconds.
+ *
+ * @param attempt Zero-based attempt index.
+ * @param multiplier Pre-computed jitter multiplier in [0, ~1.25]. Tests
+ *   pass `1.0` for determinism; production callers use `jitterMultiplier()`.
+ */
+export function nextDelay(attempt: number, multiplier: number = 1.0): number {
   if (attempt < 0) attempt = 0;
+  if (multiplier < 0) multiplier = 0;
+  // Clamp the multiplier to 1.0. A jitter multiplier > 1 would be a
+  // longer wait than the unscaled cap, which defeats the point of the
+  // cap. jitterMultiplier() always returns a value in [1 - ratio, 1 + ratio]
+  // with ratio <= 1 by default, so this clamp is a safety net for callers
+  // that pre-compute their own multipliers.
+  if (multiplier > 1) multiplier = 1;
 
-  // Compute the exponential component. Use Math.min on the exponent to
-  // avoid Infinity on absurd attempt counts.
   const exp = Math.min(attempt, MAX_EXP);
   const raw = BASE_MS * 2 ** exp;
   const capped = Math.min(raw, CAP_MS);
-
-  // Apply symmetric jitter: capped * (1 ± jitterRatio). The randomised
-  // component is provided by the caller to keep this module deterministic
-  // for tests; the default is a 25% symmetric band.
-  if (jitterRatio < 0) jitterRatio = 0;
-  if (jitterRatio > 1) jitterRatio = 1;
-
-  // We accept the jitter as a pre-computed multiplier (0.75..1.25). The
-  // caller can pass `Math.random() * 0.5 + 0.75` to get the symmetric band.
-  // The default here (1.0) is a no-op, suitable for deterministic testing.
-  const jittered = capped * jitterRatio;
-  return Math.round(jittered);
+  return Math.round(capped * multiplier);
 }
 
 /**
- * Helper for callers that want the jitter computed in one place.
- * Returns a multiplier in [1 - ratio, 1 + ratio].
+ * Symmetric jitter multiplier in `[1 - ratio, 1 + ratio]`. Default 0.25
+ * gives the ±25% band documented in DECISIONS.md.
  */
 export function jitterMultiplier(ratio: number = 0.25): number {
   if (ratio < 0) ratio = 0;

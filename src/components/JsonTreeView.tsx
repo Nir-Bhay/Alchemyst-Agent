@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import type { TimelineFilter, TimelineRowKind } from "@/state/slices/timeline";
 
 interface JsonTreeViewProps {
   readonly data: Readonly<Record<string, unknown>>;
@@ -18,12 +17,20 @@ const TYPE_COLOR: Record<string, string> = {
   number: "text-amber-300",
   boolean: "text-pink-300",
   null: "text-ink-faint",
+  undefined: "text-ink-faint",
   object: "text-sky-300",
   array: "text-violet-300",
 };
 
+// Previews of large strings get truncated to keep the DOM lean. The
+// full value is shown on the leaf's "show full" affordance in the future;
+// for now, truncation prevents a 500KB string from rendering as a single
+// text node that triggers a layout pass the size of the context panel.
+const STRING_PREVIEW_LIMIT = 200;
+
 function typeOf(v: unknown): string {
   if (v === null) return "null";
+  if (v === undefined) return "undefined";
   if (Array.isArray(v)) return "array";
   return typeof v;
 }
@@ -31,13 +38,21 @@ function typeOf(v: unknown): string {
 function PreviewValue({ value }: { value: unknown }) {
   const t = typeOf(value);
   if (t === "string") {
-    return <span className={TYPE_COLOR.string}>&quot;{String(value)}&quot;</span>;
+    const s = String(value);
+    if (s.length > STRING_PREVIEW_LIMIT) {
+      return (
+        <span className={TYPE_COLOR.string}>
+          &quot;{s.slice(0, STRING_PREVIEW_LIMIT)}&quot; <span className="text-ink-faint">…({s.length} chars)</span>
+        </span>
+      );
+    }
+    return <span className={TYPE_COLOR.string}>&quot;{s}&quot;</span>;
   }
   if (t === "number" || t === "boolean") {
     return <span className={TYPE_COLOR[t]}>{String(value)}</span>;
   }
-  if (t === "null") {
-    return <span className={TYPE_COLOR.null}>null</span>;
+  if (t === "null" || t === "undefined") {
+    return <span className={TYPE_COLOR[t]}>{t}</span>;
   }
   if (t === "array") {
     const arr = value as unknown[];
@@ -73,7 +88,6 @@ function Node({ k, value, depth, maxDepth, status, initiallyExpanded, search }: 
     return <span className="text-ink-faint"> </span>;
   })();
 
-  // Search highlight (very simple).
   const lowerSearch = search.toLowerCase();
   const text = k ?? "";
   const matchesSearch = search.length > 0 && text.toLowerCase().includes(lowerSearch);
@@ -95,7 +109,9 @@ function Node({ k, value, depth, maxDepth, status, initiallyExpanded, search }: 
     );
   }
 
-  // For large objects/arrays we lazily expand.
+  // Children are computed lazily on the first expand so the cost of
+  // mapping over a 500KB array of primitives is paid once, not on every
+  // re-render of the parent.
   const children = useMemo(() => {
     if (t === "array") {
       const arr = value as unknown[];

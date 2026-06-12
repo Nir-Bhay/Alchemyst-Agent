@@ -66,44 +66,46 @@ trigger different scripts on the server side.
 
 ## Connection state machine
 
+The lifecycle used by `ConnectionManager` is a flat five-state machine.
+The richer per-stream state (streaming vs tool-pending) is derived from
+the events themselves, not stored.
+
 ```
-                   ┌────────────────┐
-                   │  disconnected  │◀─────────────────────────┐
-                   └────────┬───────┘                          │
-                            │ open()                           │
-                            ▼                                  │
-                   ┌────────────────┐                          │
-                   │   connecting   │── error / close ─────────▶│
-                   └────────┬───────┘                          │
-                            │ onopen                           │
-                            ▼                                  │
-                   ┌────────────────┐                          │
-                   │   connected    │                          │
-                   └────────┬───────┘                          │
-                            │ USER_MESSAGE                     │
-                            ▼                                  │
-                ┌──────────────────────┐                       │
-                │      streaming       │                       │
-                │ (within active       │                       │
-                │  stream)             │                       │
-                └─┬────────────┬───────┘                       │
-                  │TOOL_CALL    │ STREAM_END / drop            │
-                  ▼            ▼                              │
-          ┌────────────┐  ┌────────────┐                       │
-          │tool_call   │  │   idle     │── next USER_MESSAGE ──▶│
-          │ pending    │  │(still conn)│                       │
-          └────┬───────┘  └────────────┘                       │
-               │TOOL_RESULT                                     │
-               ▼                                                │
-          back to streaming                                     │
-                                                                │
-    ANY state, on close/terminate: ────────────────────────────┘
-       ▼
-   ┌─────────────┐  backoff: 500ms→1s→2s→4s→8s→cap 10s
-   │ reconnecting│──────────────────────────────────────────────▶ connecting
-   └─────────────┘
-   on open, FIRST message = RESUME{last_seq=highestRenderedSeq}
+                ┌──────────────┐
+                │     idle     │ (initial, before start())
+                └──────┬───────┘
+                       │ start()
+                       ▼
+                ┌──────────────┐  error / close (non-intentional)
+                │  connecting  │──────────────────────────────────┐
+                └──────┬───────┘                                  │
+                       │ onopen                                    │
+                       ▼                                          │
+                ┌──────────────┐                                  │
+                │  connected   │◀── onopen (after reconnect) ───┐│
+                └──────┬───────┘                                 ││
+                       │ close (drop)                            ││
+                       ▼                                         ││
+                ┌──────────────┐  backoff: 500ms→1s→2s→4s→8s →  ││
+                │ reconnecting │  cap 10s, ±25% jitter          ││
+                └──────┬───────┘                                 ││
+                       │ onopen (reconnect succeeded) ───────────┘│
+                       │                                          │
+                       │  RESUME{last_seq=highestRenderedSeq} is  │
+                       │  the literal first frame on every open.  │
+                       │                                          │
+                       │ stop() (intentional) ──────────────────▶│
+                       │                                          │
+                ┌──────────────┐                                  │
+                │   stopped    │  (terminal; no further actions)  │
+                └──────────────┘◀─────────────────────────────────┘
+                       (close)
 ```
+
+The on-store `ConnectionStatus` slice is a separate, finer-grained
+status that includes `streaming` and `tool_call_pending` for the
+indicator pill, but those are derived from the message stream and do
+not have explicit transitions in the WebSocket lifecycle itself.
 
 ## Project layout
 
@@ -207,22 +209,23 @@ it. To trigger each scenario:
 
 ## Implementation rules respected
 
-- ✅ No `any` outside `src/protocol/validators.ts` (escape hatch file
-  clearly marked, top-of-file comment explaining the design choice)
-- ✅ No `@ts-ignore`
-- ✅ No AI chat libraries — streaming renderer is built from scratch
-- ✅ TypeScript strict mode, `noUncheckedIndexedAccess: true`
-- ✅ Next.js 14 App Router
-- ✅ Node 20+
-- ✅ Tailwind for styling
-- ✅ Zustand with selector-based subscriptions
-- ✅ No `useEffect` for connection lifecycle, message routing, or
+- No `any` outside `src/protocol/validators.ts` (the single escape
+  hatch, documented at the top of the file)
+- No `@ts-ignore`
+- No AI chat libraries — streaming renderer is built from scratch
+- TypeScript strict mode, `noUncheckedIndexedAccess: true`
+- Next.js 14 App Router
+- Node 20+
+- Tailwind for styling
+- Zustand with selector-based subscriptions
+- No `useEffect` for connection lifecycle, message routing, or
   reconnection — all in imperative classes / store actions
-- ✅ Custom virtualised timeline list (~80 lines, no library)
-- ✅ Per-stream chat projection, not a flat list of DOM nodes
-- ✅ Two counters (`highestReceivedSeq` / `highestRenderedSeq`);
+- Custom virtualised timeline list (~80 lines, no library)
+- Per-stream chat projection, not a flat list of DOM nodes
+- Two counters (`highestReceivedSeq` / `highestRenderedSeq`);
   `RESUME` uses `highestRenderedSeq`
-- ✅ PING → PONG in the same microtask; no `setTimeout`
-- ✅ Empty-challenge PING → `PONG{echo: ""}` (we still reply, server may
+- PING → PONG in the same microtask; no `setTimeout`
+- Empty-challenge PING → `PONG{echo: ""}` (we still reply, server may
   log a violation — that is a server bug, see DECISIONS.md)
-- ✅ Exponential backoff: 500ms → 1s → 2s → 4s → 8s → cap 10s, with jitter
+- Exponential backoff: 500ms → 1s → 2s → 4s → 8s → cap 10s, with
+  symmetric ±25% jitter

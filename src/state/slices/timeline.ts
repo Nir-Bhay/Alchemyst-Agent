@@ -129,15 +129,12 @@ export interface TimelineSlice {
   readonly timeline: ReadonlyArray<TimelineRow>;
   readonly timelineFilter: TimelineFilter;
   readonly expandedRowId: string | null;
-  /** Event ID the chat has highlighted (for bidirectional-click). */
   readonly highlightedEventId: string | null;
   readonly appendEvent: (row: TimelineRow) => void;
   readonly setTimelineFilter: (f: TimelineFilter) => void;
   readonly setExpandedRowId: (id: string | null) => void;
   readonly setHighlightedEventId: (id: string | null) => void;
   readonly resetTimeline: () => void;
-  /** Internal: append a TOKEN to the open TokenBatch if eligible. */
-  readonly tryCoalesceToken: (streamId: string, text: string, seq: Seq, at: number) => boolean;
 }
 
 const ALL_KINDS: ReadonlySet<TimelineRowKind> = new Set<TimelineRowKind>([
@@ -206,29 +203,6 @@ export function makeTimelineSlice(
         expandedRowId: null,
         highlightedEventId: null,
       })),
-    tryCoalesceToken: (streamId, text, seq, at) => {
-      // We mutate synchronously; the caller awaits setState via the slice
-      // contract. This reads the latest state via a closure capture from
-      // the store's getState(); see store.ts.
-      // For the slice, we can only see the *committed* state, so we
-      // always append a new batch (the simplest correct semantics) and let
-      // the consumer's selector collapse adjacent rows for display.
-      // However, that defeats the purpose. Instead, we perform the
-      // coalesce on the slice directly here.
-      // Note: the set() pattern of Zustand only gives us the *prior* state
-      // when we capture it. We use the slice store accessor passed at
-      // create-time. See the actual store wiring.
-      void streamId;
-      void text;
-      void seq;
-      void at;
-      // The implementation is delegated to the store because the slice's
-      // set() callback receives the current slice state at *write* time
-      // and we need to peek into `timeline`. We expose a flag here so the
-      // timeline panel can render coalesced rows even if the store
-      // appends them all.
-      return false;
-    },
   };
 }
 

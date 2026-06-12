@@ -1,5 +1,4 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// ws/messageRouter.ts
+// messageRouter
 //
 // The single point of contact between raw WebSocket frames and the
 // application store. Pipeline:
@@ -10,27 +9,25 @@
 //   4. drain         (reorder buffer; emit when in-order)
 //   5. dispatch      (commit to store; trigger side-effects like TOOL_ACK)
 //
-// The PING/PONG exchange happens inline in step 5, in the same microtask
-// as the onmessage callback. This is the fastest possible response and
-// beats the server's 3s deadline by ~3 orders of magnitude.
-//
-// TOOL_ACK is sent asynchronously but well within the 2s budget
-// (essentially immediate, queued via the next microtask).
-// ─────────────────────────────────────────────────────────────────────────────
+// PING gets a PONG in the same microtask as onmessage — there is no
+// setTimeout in the heartbeat path. TOOL_ACK is queued via
+// queueMicrotask, which fires before any I/O but after the current
+// synchronous frame; we still have ~3 orders of magnitude of headroom
+// against the server's 2s budget.
 
-import type { ClientMessage, ServerMessage } from "@/protocol/types";
+import type { ClientMessage, ResumePayload, ServerMessage } from "@/protocol/types";
 import { validateServerMessage } from "@/protocol/validators";
 import { buildPong } from "@/protocol/pongs";
-import { drain } from "@/protocol/reorderBuffer";
+import { drain, emptyBuffer } from "@/protocol/reorderBuffer";
 import { getStore } from "@/state/store";
 import type { ConnectionManager } from "./ConnectionManager";
 
 export interface RouterDeps {
-  /** Used to send outbound messages (PONG, TOOL_ACK, RESUME, USER_MESSAGE). */
+  /** Send outbound messages (PONG, TOOL_ACK, RESUME, USER_MESSAGE). */
   readonly send: (msg: ClientMessage) => void;
-  /** Notify the connection manager of a parse error (for /health reporting). */
+  /** Surface a parse / validation failure to the timeline as an error row. */
   readonly onParseError?: (raw: string) => void;
-  /** Notify that a TOOL_ACK was queued (used by the watcher to count). */
+  /** Bump the heartbeat watcher's TOOL_ACK counter for diagnostics. */
   readonly onToolAckSent?: (callId: string) => void;
 }
 
@@ -53,42 +50,40 @@ export function routeRawFrame(raw: string, deps: RouterDeps): void {
 export function routeServerMessage(msg: ServerMessage, deps: RouterDeps): void {
   const store = getStore();
 
-  // Dedup by seq.
+  // Already-rendered (or stale) → drop. This is the wire-level dedup gate;
+  // the reorder buffer's `seen` set handles in-buffer duplicates.
   if (store.dedup.has(msg.seq) || msg.seq < store.counters.highestRenderedSeq) {
     return;
   }
 
-  // PING is special: we must reply with a PONG in the same microtask.
-  // We do this BEFORE drain() so a corrupted ping doesn't block other
-  // messages if the reorder buffer holds them.
+  // PONG in the same microtask as onmessage. Done before drain() so a
+  // blocked PING can't hold up other events.
   if (msg.type === "PING") {
     deps.send(buildPong(msg));
   }
 
-  // Drain through the reorder buffer.
-  const result = drain(
-    store.reorder,
-    msg,
-    // The "seen" set is the dedup's internal set; we don't have direct
-    // access but we have already short-circuited on the highestRendered
-    // above. The drain function will further dedup against the local
-    // pending map and the explicit `seen` set (we pass an empty Set
-    // here; dedup against already-rendered seqs is handled by
-    // noteReceived + the highestRenderedSeq check above).
-    new Set(),
-  );
+  // Reorder buffer: collect future seqs, drain contiguous runs.
+  const result = drain(store.reorder, msg, new Set());
 
-  // Update reorder buffer state regardless of emission.
-  store.setReorderState({
-    nextExpectedSeq: result.nextExpectedSeq,
-    pending: result.stillPending,
-  });
+  // Only write the new buffer state if the cursor actually moved or the
+  // pending set changed — otherwise we'd re-render every store subscriber
+  // on every message just to write an equivalent Map<>.
+  const cursorMoved = result.nextExpectedSeq !== store.reorder.nextExpectedSeq;
+  const pendingChanged = result.stillPending !== store.reorder.pending;
+  if (cursorMoved || pendingChanged) {
+    store.setReorderState({
+      nextExpectedSeq: result.nextExpectedSeq,
+      pending: result.stillPending,
+    });
+  }
 
   for (const emitted of result.emitted) {
     store.onServerMessage(emitted, Date.now());
   }
 
-  // Always emit a PING row to the timeline so the user can see heartbeats.
+  // A PING row is always appended so the user can see heartbeats (and so
+  // the timeline's PING/PONG pair renders even when PONG is a server
+  // verdict with `wrong_challenge`).
   if (msg.type === "PING") {
     store.appendEvent({
       id: `tl_ping_${Date.now()}_${msg.seq}`,
@@ -99,8 +94,6 @@ export function routeServerMessage(msg: ServerMessage, deps: RouterDeps): void {
     });
   }
 
-  // TOOL_CALL: queue TOOL_ACK within 2s. We use queueMicrotask to fire
-  // it on the next microtask — sub-millisecond latency, well under 2s.
   if (msg.type === "TOOL_CALL") {
     queueMicrotask(() => {
       deps.send({ type: "TOOL_ACK", call_id: msg.call_id });
@@ -109,27 +102,22 @@ export function routeServerMessage(msg: ServerMessage, deps: RouterDeps): void {
     });
   }
 
-  // TOOL_RESULT: nothing to send (it's a server→client message), but
-  // when the result comes back, also note that the corresponding tool
-  // card is no longer awaiting.
-  if (msg.type === "TOOL_RESULT") {
-    // The streams slice handles the state transition.
-  }
-
-  // STREAM_END: clear the connection's isResuming flag (we are caught up
-  // to where the user is).
-  if (msg.type === "STREAM_END") {
-    if (store.connection.isResuming) {
-      store.setIsResuming(false);
-    }
+  // A successful STREAM_END means we have caught up with the wire, even
+  // if we entered this connection via RESUME. Clear the resuming flag so
+  // the indicator pill flips from "resuming" to "connected".
+  if (msg.type === "STREAM_END" && store.connection.isResuming) {
+    store.setIsResuming(false);
   }
 }
 
-export function buildResumeMessage(): ClientMessage | null {
+export function buildResumeMessage(): ResumePayload | null {
   const store = getStore();
-  // If we never rendered anything, no resume needed.
   if (store.counters.highestRenderedSeq === 0) return null;
   return { type: "RESUME", last_seq: store.counters.highestRenderedSeq };
 }
+
+// Re-exported for the test harness so the empty-buffer constructor is
+// the same import the store uses.
+export { emptyBuffer };
 
 export type { ConnectionManager };

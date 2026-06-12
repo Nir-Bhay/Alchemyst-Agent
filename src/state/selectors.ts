@@ -1,21 +1,19 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// state/selectors.ts
+// selectors
 //
-// Fine-grained selector helpers. Components import these instead of reading
-// `useAppStore` directly so that subscription scope is obvious at the
-// call site. Each selector returns a derived value; Zustand's default
-// `useStore(selector)` does a referential equality check on the result
-// and re-renders only if it changed.
+// Fine-grained selector helpers. Each component imports the selector
+// that exactly matches what it renders; Zustand's default
+// `useStore(selector)` compares the selector's return value with `===`
+// and re-renders only on actual change.
 //
-// Selectors that return a derived object MUST be wrapped in a custom
-// equality function (we do that with `useShallow` from `zustand/shallow`)
-// to avoid re-rendering when the underlying fields didn't change.
-// ─────────────────────────────────────────────────────────────────────────────
+// For derived arrays/objects we wrap with `useShallow` so the equality
+// check is element-wise — otherwise `.filter()` would return a new
+// reference on every store change and re-render the panel on every
+// token.
 
 import { useShallow } from "zustand/react/shallow";
+import { useMemo } from "react";
 import { useAppStore } from "./store";
 import type { TimelineRow, TimelineRowKind } from "./slices/timeline";
-import type { TimelineFilter } from "./slices/timeline";
 import type { AppStore } from "./store";
 
 // ── Chat selectors ──────────────────────────────────────────────────────────
@@ -25,16 +23,10 @@ export function useStreamsList(): ReadonlyArray<string> {
 }
 
 export function useStream(streamId: string) {
-  // Return the full stream state. The component is responsible for
-  // being smart about which fields it actually re-renders on; for the
-  // chat text we use an imperative subscription in StreamBubble so
-  // re-renders are cheap (the DOM text content is not in JSX).
   return useAppStore((s: AppStore) => s.streams.get(streamId));
 }
 
 export function useActiveStreamId(): string | null {
-  // The most recently updated stream whose `streamEnded` is false.
-  // If none, return the last stream in order.
   return useAppStore((s: AppStore) => {
     for (let i = s.streamOrder.length - 1; i >= 0; i--) {
       const id = s.streamOrder[i];
@@ -49,25 +41,34 @@ export function useActiveStreamId(): string | null {
 
 // ── Timeline selectors ──────────────────────────────────────────────────────
 
-export function useTimeline() {
-  return useAppStore((s: AppStore) => s.timeline);
+export function useTimelineFilter(): { readonly kinds: ReadonlySet<TimelineRowKind>; readonly search: string } {
+  return useAppStore(
+    useShallow((s: AppStore) => ({ kinds: s.timelineFilter.kinds, search: s.timelineFilter.search })),
+  );
 }
 
-export function useTimelineFilter(): TimelineFilter {
-  return useAppStore(useShallow((s: AppStore) => s.timelineFilter));
-}
-
+/**
+ * Filtered + searched timeline rows. The dependency on `timeline` and
+ * `timelineFilter` is tracked here: the filter result is memoized so
+ * unrelated store changes (e.g. a token for an off-screen stream) do not
+ * recompute or re-render the timeline panel.
+ */
 export function useFilteredTimeline(): ReadonlyArray<TimelineRow> {
-  return useAppStore((s: AppStore) => {
-    const { kinds, search } = s.timelineFilter;
-    if (kinds.size === 0) return [];
-    if (search.length === 0) return s.timeline.filter((r) => kinds.has(r.kind));
-    const lower = search.toLowerCase();
-    return s.timeline.filter((r) => {
-      if (!kinds.has(r.kind)) return false;
+  const timeline = useAppStore((s: AppStore) => s.timeline);
+  const filter = useAppStore(
+    useShallow((s: AppStore) => ({ kinds: s.timelineFilter.kinds, search: s.timelineFilter.search })),
+  );
+  return useMemo(() => {
+    if (filter.kinds.size === 0) return [];
+    if (filter.search.length === 0) {
+      return timeline.filter((r) => filter.kinds.has(r.kind));
+    }
+    const lower = filter.search.toLowerCase();
+    return timeline.filter((r) => {
+      if (!filter.kinds.has(r.kind)) return false;
       return rowMatchesSearch(r, lower);
     });
-  });
+  }, [timeline, filter]);
 }
 
 function rowMatchesSearch(row: TimelineRow, lower: string): boolean {
@@ -133,10 +134,6 @@ export function useContexts() {
 
 export function useActiveContextId(): string | null {
   return useAppStore((s: AppStore) => s.activeContextId);
-}
-
-export function useContextHistory(contextId: string | null) {
-  return useAppStore((s: AppStore) => (contextId ? s.contexts.get(contextId) ?? null : null));
 }
 
 // ── Filter helpers (exported for FilterBar) ────────────────────────────────

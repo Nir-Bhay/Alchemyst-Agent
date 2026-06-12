@@ -13,14 +13,24 @@ interface ChatPanelProps {
   readonly conn: ConnectionManager | null;
 }
 
+const CANNED_PROMPTS: ReadonlyArray<{ prompt: string; description: string }> = [
+  { prompt: "hello", description: "basic greeting" },
+  { prompt: "summarize the report", description: "one tool call" },
+  { prompt: "analyze the correlation", description: "two tool calls" },
+  { prompt: "show me the schema", description: "550KB+ context" },
+  { prompt: "write a long detailed document", description: "RESUME demo" },
+  { prompt: "look up the SLA", description: "knowledge base lookup" },
+];
+
 export function ChatPanel({ conn }: ChatPanelProps) {
   const streamOrder = useStreamsList();
   const activeStreamId = useActiveStreamId();
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // Auto-scroll to bottom when new content arrives, but only if the
-  // user is already near the bottom (don't fight manual scrolling).
+  // Auto-scroll when new content arrives, but only if the user is already
+  // near the bottom. Fighting manual scrolling is a worse experience than
+  // not auto-scrolling.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -34,21 +44,8 @@ export function ChatPanel({ conn }: ChatPanelProps) {
     const text = input.trim();
     if (!text || !conn) return;
     const msg: ClientMessage = { type: "USER_MESSAGE", content: text };
-    // Tell the store to reset per-turn state (counters, streams, timeline).
     useAppStore.getState().onUserMessage();
-    try {
-      conn.start(); // ensure connected
-      // Send directly through the WS via the manager's internal send.
-      // We expose a small `sendMessage` shim on the manager instead of
-      // a public method; but here we use the store's connection status
-      // and rely on the manager to deliver.
-      // The ConnectionManager does not expose a public send; the
-      // easiest is to dispatch a custom event. Instead we just call
-      // a method on the manager.
-      sendThroughManager(conn, msg);
-    } catch {
-      // ignore
-    }
+    conn.send(msg);
     setInput("");
   };
 
@@ -68,9 +65,7 @@ export function ChatPanel({ conn }: ChatPanelProps) {
         className="min-h-0 flex-1 overflow-y-auto p-4"
         data-testid="chat-scroll"
       >
-        {streamOrder.length === 0 && (
-          <EmptyState />
-        )}
+        {streamOrder.length === 0 && <EmptyState />}
         <div className="space-y-3">
           {streamOrder.map((id, i) => (
             <StreamView key={id} streamId={id} index={i} />
@@ -114,9 +109,6 @@ export function ChatPanel({ conn }: ChatPanelProps) {
 }
 
 function StreamView({ streamId, index }: { streamId: string; index: number }) {
-  // Use the streaming-active selector so only this component re-renders
-  // when its specific stream changes. Other streams' bubbles don't
-  // re-render on a token for stream X.
   const stream = useStream(streamId);
   if (!stream) return null;
   return <StreamBubble streamId={streamId} stream={stream} index={index} />;
@@ -129,35 +121,12 @@ function EmptyState() {
         No messages yet. Try one of the canned prompts:
       </div>
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink-faint">
-        <div>&quot;hello&quot; — basic greeting</div>
-        <div>&quot;summarize the report&quot; — one tool call</div>
-        <div>&quot;analyze the correlation&quot; — two tool calls</div>
-        <div>&quot;show me the schema&quot; — large 550KB+ context</div>
-        <div>&quot;write a long detailed document&quot; — RESUME demo</div>
-        <div>&quot;look up the SLA&quot; — knowledge base lookup</div>
+        {CANNED_PROMPTS.map((p) => (
+          <div key={p.prompt}>
+            &quot;{p.prompt}&quot; — {p.description}
+          </div>
+        ))}
       </div>
     </div>
   );
-}
-
-// ── shim: send a client message through the manager ──────────────────────────
-//
-// The ConnectionManager currently routes *inbound* messages via the
-// message router but does not expose a public `send` method. Rather
-// than over-engineer a public API for one call site, we add a tiny
-// helper. If you need to send more message types from the UI, expand
-// this to a typed method on the manager.
-
-function sendThroughManager(manager: ConnectionManager, msg: ClientMessage): void {
-  // We access the internal WebSocket through a known interface name.
-  // If the field is renamed, this will TypeError; that's deliberate —
-  // a renamed field is a signal that the public API needs a real method.
-  const internalWs = (manager as unknown as { ws: WebSocket | null }).ws;
-  if (!internalWs) return;
-  if (internalWs.readyState !== WebSocket.OPEN) return;
-  try {
-    internalWs.send(JSON.stringify(msg));
-  } catch {
-    // best effort
-  }
 }

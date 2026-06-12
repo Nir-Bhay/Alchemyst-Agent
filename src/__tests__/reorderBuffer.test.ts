@@ -48,13 +48,8 @@ describe("reorderBuffer", () => {
   });
 
   it("drops stale events (seq < nextExpected)", () => {
-    let state = emptyBuffer();
-    state = drain(state, msg(5), new Set()).stillPending && {
-      ...state,
-      nextExpectedSeq: 6,
-    };
-    // After processing seq=5, the state should be { nextExpectedSeq: 6, pending: {} }.
-    // Now an incoming seq=2 is stale.
+    // After processing seq=5 the buffer cursor sits at 6. An incoming
+    // seq=2 is stale — well below the next expected slot.
     const r = drain(
       { nextExpectedSeq: 6, pending: new Map() },
       msg(2),

@@ -1,42 +1,31 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// ws/ConnectionManager.ts
+// ConnectionManager
 //
-// Owns the WebSocket lifecycle. One instance per page lifetime (singleton,
-// held in a React effect that mounts once on the client).
+// Owns the WebSocket lifecycle. One instance per page (singleton, held in
+// a React effect that mounts once on the client). Responsibilities:
 //
-// Responsibilities:
+//   - Open the socket.
+//   - On open: send RESUME{last_seq = highestRenderedSeq} as the *first*
+//     frame, then clear the reconnect indicator.
+//   - On message: route through the message router; PING/PONG/TOOL_ACK
+//     happen inline in the same microtask.
+//   - On close / error: flip to "reconnecting" within the same tick (the
+//     React indicator picks it up on the next render, sub-500ms), schedule
+//     a backoff retry, and mark in-flight tool cards as `droppedWhileWaiting`.
+//   - On intentional close: stop reconnecting.
 //
-//   - Open the socket.  (URL comes from config; defaults to ws://localhost:4747/ws.)
-//   - On open:
-//       1. mark connection status = "connected"
-//       2. send RESUME{last_seq=highestRenderedSeq} if we have a previous turn
-//       3. clear the reconnect indicator
-//
-//   - On message: delegate to messageRouter. PING/PONG/TOOL_ACK are
-//     handled there in the same microtask.
-//
-//   - On close / error:
-//       1. mark connection status = "reconnecting" (within 500ms per spec)
-//       2. schedule a reconnect with exponential backoff + jitter
-//       3. mark all in-flight tool cards as "droppedWhileWaiting"
-//
-//   - On intentional close (user navigates away): stop reconnecting.
-//
-// The class is fully imperative. There is no useEffect spaghetti here —
-// the React layer just constructs one and calls `start()` / `stop()`.
-// ─────────────────────────────────────────────────────────────────────────────
+// The class is fully imperative. There is no useEffect for connection
+// lifecycle; the React layer just constructs one and calls start/stop.
 
 import { getStore } from "@/state/store";
-import { buildResumeMessage } from "./messageRouter";
-import { routeRawFrame } from "./messageRouter";
+import { buildResumeMessage, routeRawFrame } from "./messageRouter";
 import { jitterMultiplier, nextDelay } from "@/lib/backoff";
 import { HeartbeatWatcher } from "./HeartbeatWatcher";
+import type { ClientMessage } from "@/protocol/types";
 
 export interface ConnectionManagerOptions {
   readonly url: string;
-  /** Maximum time to wait between reconnect attempts (ms). */
+  /** Cap on the inter-attempt delay (ms). Defaults to 10s per the spec. */
   readonly maxBackoffMs?: number;
-  /** Called when the connection state changes (for indicator rendering). */
   readonly onStateChange?: (s: ConnectionLifecycleState) => void;
 }
 
@@ -49,7 +38,7 @@ export type ConnectionLifecycleState =
 
 export class ConnectionManager {
   private ws: WebSocket | null = null;
-  private heartbeat: HeartbeatWatcher = new HeartbeatWatcher();
+  private readonly heartbeat = new HeartbeatWatcher();
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
@@ -95,6 +84,15 @@ export class ConnectionManager {
     return this.currentState === "connected";
   }
 
+  /**
+   * Send a typed client message. Drops silently if the socket is not open.
+   * One outbound path for PONG/TOOL_ACK/RESUME/USER_MESSAGE so the socket
+   * checks live in exactly one place.
+   */
+  send(msg: ClientMessage): void {
+    this.sendRaw(msg);
+  }
+
   private transition(s: ConnectionLifecycleState): void {
     this.currentState = s;
     this.onStateChange?.(s);
@@ -102,11 +100,10 @@ export class ConnectionManager {
 
   private openSocket(): void {
     if (this.stopped) return;
-    this.transition(this.reconnectAttempts === 0 ? "connecting" : "reconnecting");
-    getStore().setConnectionStatus(
-      this.reconnectAttempts === 0 ? "connecting" : "reconnecting",
-    );
-    if (this.reconnectAttempts > 0) {
+    const isReconnect = this.reconnectAttempts > 0;
+    this.transition(isReconnect ? "reconnecting" : "connecting");
+    getStore().setConnectionStatus(isReconnect ? "reconnecting" : "connecting");
+    if (isReconnect) {
       getStore().setReconnectAttempts(this.reconnectAttempts);
     }
 
@@ -132,7 +129,8 @@ export class ConnectionManager {
     store.setReconnectAttempts(0);
     this.reconnectAttempts = 0;
 
-    // If we have a previous turn's last rendered seq, send RESUME first.
+    // RESUME is the literal first frame on a fresh connection when we have
+    // a previous turn's last rendered seq.
     const resume = buildResumeMessage();
     if (resume) {
       this.sendRaw(resume);
@@ -141,7 +139,7 @@ export class ConnectionManager {
         kind: "resume",
         seq: 0,
         at: Date.now(),
-        lastSeq: (resume as { last_seq: number }).last_seq,
+        lastSeq: resume.last_seq,
       });
       store.setIsResuming(true);
     }
@@ -150,13 +148,13 @@ export class ConnectionManager {
   private onMessage(ev: MessageEvent): void {
     const data = ev.data;
     if (typeof data !== "string") {
-      // The server only sends text frames, but be defensive.
+      // The server only sends text frames; anything else is a protocol
+      // violation we cannot meaningfully surface. Drop silently.
       return;
     }
     routeRawFrame(data, {
       send: (msg) => this.sendRaw(msg),
       onParseError: (raw) => {
-        // Surface as a system row in the timeline; do not crash.
         getStore().appendEvent({
           id: `tl_err_${Date.now()}`,
           kind: "error",
@@ -166,22 +164,18 @@ export class ConnectionManager {
           message: raw.slice(0, 200),
         });
       },
-      onToolAckSent: (callId) => {
-        getStore().recordPong(callId, Date.now());
-        // We piggy-back on the same counter for both ACKs and PONGs.
-        // (The watcher tracks counts separately.)
-        this.heartbeat.onPing({ type: "PING", seq: 0, challenge: "" });
+      onToolAckSent: () => {
+        this.heartbeat.onToolAckSent();
       },
     });
   }
 
   private onError(): void {
-    // The error event is always followed by a close event. We do nothing
-    // here; the close handler does the reconnect.
+    // Browsers fire error immediately before close; the close handler is
+    // the source of truth for reconnection.
   }
 
   private onClose(ev: CloseEvent): void {
-    void ev;
     if (this.intentionalClose) return;
     const reason = ev.reason || `code_${ev.code}`;
     getStore().onConnectionDrop(reason, Date.now());
@@ -191,7 +185,12 @@ export class ConnectionManager {
   private scheduleReconnect(): void {
     if (this.stopped) return;
     this.reconnectAttempts++;
-    const delay = nextDelay(this.reconnectAttempts, jitterMultiplier());
+    // jitterMultiplier returns a number in [0.75, 1.25]; we multiply the
+    // capped backoff by it. Tests pass an explicit 1.0 for determinism.
+    const delay = Math.min(
+      this.maxBackoffMs,
+      nextDelay(this.reconnectAttempts, jitterMultiplier()),
+    );
     getStore().setReconnectAttempts(this.reconnectAttempts);
     getStore().appendEvent({
       id: `tl_recon_${Date.now()}`,
@@ -207,18 +206,15 @@ export class ConnectionManager {
     }, delay);
   }
 
-  private sendRaw(msg: unknown): void {
-    if (!this.ws) return;
-    if (this.ws.readyState !== WebSocket.OPEN) return;
+  private sendRaw(msg: ClientMessage): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     try {
       this.ws.send(JSON.stringify(msg));
-      // Track PONGs in the heartbeat watcher for diagnostics.
-      const m = msg as { type?: string; echo?: string };
-      if (m.type === "PONG") {
+      if (msg.type === "PONG") {
         this.heartbeat.onPongSent(Date.now());
       }
     } catch {
-      // Best effort; close handler will reconnect.
+      // Best effort; the close handler will reconnect.
     }
   }
 }

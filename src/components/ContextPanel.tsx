@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import {
   useContexts,
   useActiveContextId,
@@ -18,24 +18,19 @@ export function ContextPanel() {
   const setActive = useAppStore((s) => s.setActiveContextId);
   const setCursor = useAppStore((s) => s.setContextCursor);
 
+  // activeStreamId is intentionally read here so the panel re-renders
+  // when the active stream changes; the actual stream→context mapping
+  // is owned by the contexts slice (set on every CONTEXT_SNAPSHOT).
+  void activeStreamId;
+
   const history = activeContextId ? contexts.get(activeContextId) ?? null : null;
 
-  // If no active context but we have one, switch to it.
   useEffect(() => {
     if (!activeContextId && contexts.size > 0) {
       const first = contexts.keys().next().value;
       if (typeof first === "string") setActive(first);
     }
   }, [activeContextId, contexts, setActive]);
-
-  // Pick the context that matches the most recent stream (heuristic).
-  useEffect(() => {
-    if (!activeStreamId) return;
-    // No direct mapping from stream_id to context_id; we just keep
-    // the latest context that arrived. The active context is set by
-    // the context slice on every CONTEXT_SNAPSHOT append, so this
-    // effect is mostly a no-op.
-  }, [activeStreamId]);
 
   return (
     <div className="flex h-full min-h-0 flex-col border-l border-line bg-bg">
@@ -153,18 +148,11 @@ function Scrubber({
   );
 }
 
-function SnapshotView({
-  history,
-}: {
-  history: ContextHistory;
-}) {
+function SnapshotView({ history }: { history: ContextHistory }) {
   const snap = history.snapshots[history.cursor];
-  const prev = history.cursor > 0 ? history.snapshots[history.cursor - 1] : null;
-  // Recompute a diff against prev if the snapshot's pre-computed diff
-  // is for a different pair (i.e., user scrubbed back). We do this
-  // lazily by looking at the snapshot's `diff` field — which is always
-  // `snap[i] vs snap[i-1]`. When the cursor is i, that's exactly the
-  // diff we want.
+  // The diff is always `snapshots[i] vs snapshots[i-1]`; the contexts
+  // slice pre-computes and caches it at append time, so the scrubber is
+  // a pure read.
   const diff = useMemo(() => {
     if (!snap || !snap.diff) return null;
     return {
@@ -177,7 +165,6 @@ function SnapshotView({
   if (!snap) {
     return <div className="p-4 text-xs text-ink-faint">Empty context.</div>;
   }
-  void prev;
 
   return (
     <>

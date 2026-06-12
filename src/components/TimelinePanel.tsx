@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useFilteredTimeline } from "@/state/selectors";
 import { useAppStore } from "@/state/store";
-import type { TimelineRow, TokenBatchRow } from "@/state/slices/timeline";
+import type { TimelineRow } from "@/state/slices/timeline";
 import { WindowedList } from "./windowed/WindowedList";
 import { cx, shortNumber, truncate } from "@/lib/dom";
 
@@ -238,6 +238,3 @@ function describe(row: TimelineRow): {
       };
   }
 }
-
-// Re-export so the JSX can use it for narrowing.
-export type _Used = TokenBatchRow;

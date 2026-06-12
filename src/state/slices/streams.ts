@@ -66,7 +66,7 @@ export interface StreamsSlice {
   ) => void;
   readonly applyStreamEnd: (streamId: string, seq: Seq) => void;
   readonly markAcked: (callId: string) => void;
-  readonly markAllDropsInStream: (streamId: string, droppedAt: number) => void;
+  readonly markAllDropsInStream: (streamId: string) => void;
   readonly resetStreams: () => void;
 }
 
@@ -234,13 +234,19 @@ export function makeStreamsSlice(
         if (!changed) return s;
         return { ...s, streams: newMap };
       }),
-    markAllDropsInStream: (streamId, _droppedAt) =>
+    markAllDropsInStream: (streamId) =>
       set((s) => {
         const stream = s.streams.get(streamId);
         if (!stream) return s;
-        const newCards = stream.toolCards.map((c) =>
-          c.awaitingResult ? { ...c, droppedWhileWaiting: true } : c,
-        );
+        let changed = false;
+        const newCards = stream.toolCards.map((c) => {
+          if (c.awaitingResult && !c.droppedWhileWaiting) {
+            changed = true;
+            return { ...c, droppedWhileWaiting: true };
+          }
+          return c;
+        });
+        if (!changed) return s;
         const newMap = new Map(s.streams);
         newMap.set(streamId, { ...stream, toolCards: newCards });
         return { ...s, streams: newMap };
