@@ -58,7 +58,29 @@ export class ConnectionManager {
     this.onStateChange = opts.onStateChange;
   }
 
+  /**
+   * Start (or restart) the connection.
+   *
+   * Idempotent: if the manager is already connecting, connected, or has a
+   * reconnect scheduled, this is a no-op. The previous implementation
+   * unconditionally called `openSocket()`, which meant that React Strict
+   * Mode's dev-mode double-invocation (or a duplicate `useEffect` mount
+   * caused by Fast Refresh) opened a second WebSocket on top of the first.
+   * The server then closed the older one with `1000 "replaced"`, the old
+   * socket's close handler ran `scheduleReconnect`, and the new mount's
+   * `start()` raced with the reconnect timer to open yet another socket —
+   * ad infinitum. Guarding here is the actual fix; the `globalThis`
+   * singleton is the belt-and-braces for HMR module replacement.
+   */
   start(): void {
+    if (
+      this.currentState === "connecting" ||
+      this.currentState === "connected" ||
+      this.currentState === "reconnecting" ||
+      this.reconnectTimer !== null
+    ) {
+      return;
+    }
     this.stopped = false;
     this.intentionalClose = false;
     this.openSocket();
@@ -232,26 +254,37 @@ export class ConnectionManager {
 // server sees connection codes 1006/1001 in a tight loop.
 //
 // The singleton lives for the lifetime of the JS module on the page; in
-// practice that's the tab. Fast Refresh only swaps the module exports, but
-// module-level state survives that swap. In production the page reloads
-// and the singleton is born fresh.
+// practice that's the tab. In production the page reloads and the
+// singleton is born fresh.
+//
+// The singleton is held on `globalThis` rather than a module-level `let`.
+// `globalThis` survives not just Fast Refresh (which already preserves
+// module state) but also the rarer case where a hot update re-evaluates
+// the importing module from scratch — at which point a module-level `let`
+// would be reset to `null` and the second mount would create a fresh
+// `ConnectionManager` racing with the first. `globalThis` is the
+// canonical escape hatch in Next.js apps for "this state must outlive
+// every possible HMR boundary."
 //
 // Tests don't import this singleton (the `__tests__` directory only
 // covers pure logic), so isolation is unaffected.
-let sharedManager: ConnectionManager | null = null;
+declare global {
+  // eslint-disable-next-line no-var
+  var __agentConsoleConnectionManager: ConnectionManager | undefined;
+}
 
 export function getSharedConnectionManager(
   opts: ConnectionManagerOptions,
 ): ConnectionManager {
-  if (!sharedManager) {
-    sharedManager = new ConnectionManager(opts);
+  if (!globalThis.__agentConsoleConnectionManager) {
+    globalThis.__agentConsoleConnectionManager = new ConnectionManager(opts);
   }
-  return sharedManager;
+  return globalThis.__agentConsoleConnectionManager;
 }
 
 export function disposeSharedConnectionManager(): void {
-  if (sharedManager) {
-    sharedManager.stop();
-    sharedManager = null;
+  if (globalThis.__agentConsoleConnectionManager) {
+    globalThis.__agentConsoleConnectionManager.stop();
+    globalThis.__agentConsoleConnectionManager = undefined;
   }
 }
