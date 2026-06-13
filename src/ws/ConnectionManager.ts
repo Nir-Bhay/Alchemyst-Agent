@@ -1,7 +1,9 @@
 // ConnectionManager
 //
 // Owns the WebSocket lifecycle. One instance per page (singleton, held in
-// a React effect that mounts once on the client). Responsibilities:
+// a React effect that mounts once on the client; see `getSharedConnectionManager`
+// below for the module-level handle that survives Fast Refresh).
+// Responsibilities:
 //
 //   - Open the socket.
 //   - On open: send RESUME{last_seq = highestRenderedSeq} as the *first*
@@ -14,7 +16,8 @@
 //   - On intentional close: stop reconnecting.
 //
 // The class is fully imperative. There is no useEffect for connection
-// lifecycle; the React layer just constructs one and calls start/stop.
+// lifecycle; the React layer just asks the singleton for a manager and
+// calls start on first mount.
 
 import { getStore } from "@/state/store";
 import { buildResumeMessage, routeRawFrame } from "./messageRouter";
@@ -216,5 +219,39 @@ export class ConnectionManager {
     } catch {
       // Best effort; the close handler will reconnect.
     }
+  }
+}
+
+// Module-level singleton.
+//
+// Next.js Fast Refresh re-mounts client components on every file edit in
+// dev mode. If we constructed a fresh `new ConnectionManager(...)` on each
+// mount, the cleanup of the previous instance would call `ws.close()` while
+// the new mount opened a fresh socket — the browser then surfaces
+// "WebSocket is closed before the connection is established" and the
+// server sees connection codes 1006/1001 in a tight loop.
+//
+// The singleton lives for the lifetime of the JS module on the page; in
+// practice that's the tab. Fast Refresh only swaps the module exports, but
+// module-level state survives that swap. In production the page reloads
+// and the singleton is born fresh.
+//
+// Tests don't import this singleton (the `__tests__` directory only
+// covers pure logic), so isolation is unaffected.
+let sharedManager: ConnectionManager | null = null;
+
+export function getSharedConnectionManager(
+  opts: ConnectionManagerOptions,
+): ConnectionManager {
+  if (!sharedManager) {
+    sharedManager = new ConnectionManager(opts);
+  }
+  return sharedManager;
+}
+
+export function disposeSharedConnectionManager(): void {
+  if (sharedManager) {
+    sharedManager.stop();
+    sharedManager = null;
   }
 }

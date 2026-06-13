@@ -5,7 +5,10 @@ import { ChatPanel } from "./ChatPanel";
 import { TimelinePanel } from "./TimelinePanel";
 import { ContextPanel } from "./ContextPanel";
 import { FilterBar } from "./FilterBar";
-import { ConnectionManager } from "@/ws/ConnectionManager";
+import {
+  ConnectionManager,
+  getSharedConnectionManager,
+} from "@/ws/ConnectionManager";
 import { getStore } from "@/state/store";
 
 const WS_URL =
@@ -22,7 +25,13 @@ export function Console() {
   const managerRef = useRef<ConnectionManager | null>(null);
 
   useEffect(() => {
-    const manager = new ConnectionManager({
+    // Use the module-level singleton so that Next.js Fast Refresh in dev
+    // mode does not tear the WebSocket down on every component re-mount.
+    // The first mount creates the manager and starts the socket; later
+    // mounts (after a file edit) just re-attach the same instance and
+    // skip starting a new socket.
+    const isFirstMount = managerRef.current === null;
+    const manager = getSharedConnectionManager({
       url: WS_URL,
       onStateChange: () => {
         // State is owned by the store; the manager pushes transitions
@@ -31,7 +40,9 @@ export function Console() {
       },
     });
     managerRef.current = manager;
-    manager.start();
+    if (isFirstMount) {
+      manager.start();
+    }
 
     // The store reflects connection state in real time; the /health poll
     // exists only to surface the server's mode (normal vs chaos) in the
@@ -49,9 +60,11 @@ export function Console() {
       }
     }, HEALTH_POLL_MS);
 
+    // Cleanup intentionally does NOT call `manager.stop()`. The singleton
+    // owns the socket's lifetime (it survives Fast Refresh re-mounts); the
+    // WebSocket is torn down only on full page unload.
     return () => {
       clearInterval(poll);
-      manager.stop();
       managerRef.current = null;
     };
   }, []);
@@ -66,9 +79,9 @@ export function Console() {
           </span>
         </div>
       </header>
-      <main className="grid min-h-0 flex-1 grid-cols-[1fr_360px_360px]">
+      <main className="grid min-h-0 flex-1 grid-cols-[1fr_360px_360px] grid-rows-[minmax(0,1fr)]">
         <ChatPanel conn={managerRef.current} />
-        <div className="flex min-h-0 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-col">
           <FilterBar />
           <TimelinePanel />
         </div>
